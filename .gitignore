@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Jupyter runtime
+.jupyter/
+
+# VS Code
+.vscode/
+
+# pyc files
+*.pyc
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Model checkpoints / saved models (can be large)
+*.zip
+*.pkl
+*.pt
+*.pth
+*.ckpt
+
+# Logs
+*.log
+logs/
+
+# Stable Baselines3 / PPO saved files
+models/
