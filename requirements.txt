@@ -1,0 +1,19 @@
+# Core RL
+gymnasium>=0.29.0
+stable-baselines3>=2.3.0
+
+# Observation encoder
+sentence-transformers>=3.0.0
+
+# LLM client
+httpx>=0.27.0
+
+# Scientific / plotting
+numpy>=1.26.0
+matplotlib>=3.8.0
+
+# Deep learning backend (required by sentence-transformers)
+torch>=2.2.0
+
+# Tokenizer (used for LLM token-count analysis)
+transformers>=4.40.0
