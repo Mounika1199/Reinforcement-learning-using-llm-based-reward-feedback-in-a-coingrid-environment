@@ -248,11 +248,11 @@ The per-step prompt provides the LLM with movement context (previous/new positio
 If you use this work, please cite:
 
 ```bibtex
-@mastersthesis{dantuluri2025coingrid,
+@mastersthesis{Buddharaju2026coingrid,
   author  = {Mounika Buddharaju},
   title   = {Reinforcement Learning with LLM-Based Reward Feedback
              in a CoinGrid Environment},
-  year    = {2025},
+  year    = {2026},
   school  = {Technische Universität Hamburg (TUHH)},
 }
 ```
