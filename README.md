@@ -253,7 +253,7 @@ If you use this work, please cite:
   title   = {Reinforcement Learning with LLM-Based Reward Feedback
              in a CoinGrid Environment},
   year    = {2025},
-  school  = {YOUR UNIVERSITY},
+  school  = {Technische Universität Hamburg (TUHH)},
 }
 ```
 
