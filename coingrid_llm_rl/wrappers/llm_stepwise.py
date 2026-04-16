@@ -1,28 +1,29 @@
 """
 LLMStepwiseRewardWrapper
 -------------------------
-Most sophisticated LLM reward wrapper.
+LLM reward wrapper that evaluates every step and the full episode.
 
-Design principle
-~~~~~~~~~~~~~~~~
-**Python computes every numeric fact; the LLM applies a symbolic rule.**
+Design
+~~~~~~
+At each step, Python provides the LLM with:
+  - the instruction and required coins
+  - previous and new collected-coin counts
+  - which coins were picked up this step
+  - agent movement (prev/new position)
+  - Manhattan distance to the nearest required coin before and after the step
 
-At each step Python pre-computes:
-  - which coins were collected and whether they count as "required" or "extra"
-  - the Manhattan-distance trend (closer / farther / same / no_required)
+The LLM applies open-ended guidelines to decide an appropriate reward in
+[-1.0, 1.0] and returns it tagged as ``FScore: <float>``.
 
-These facts are handed to the LLM in a structured prompt.  The model follows
-a strict, unambiguous decision rule and returns a single float.
+At episode end the LLM additionally receives the full step-event log and
+the final summary, and assigns a terminal score using the standard formula.
 
-At episode end, the LLM additionally receives the full episode summary and
-applies the standard scoring formula for a final episodic score.
-
-Bug-fix vs. original notebook
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The original code classified collected coins **after** incrementing
-``required_collected``, which caused valid coins to be mis-labelled as
-"extra" when the required count was exactly 1.  The fix is to record the
-pre-increment count and classify against that snapshot.
+Distance notes
+~~~~~~~~~~~~~~
+Distance is computed against ``coin_positions`` — the initial grid snapshot
+taken at ``reset()`` time.  This means the distance signal may reference
+positions of already-collected coins; the LLM has full context (counts,
+step events) to interpret this correctly.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ import re
 import gymnasium as gym
 
 from coingrid_llm_rl.llm.client import query_ollama
-from coingrid_llm_rl.llm.prompts import build_step_prompt, build_episodic_prompt
+from coingrid_llm_rl.llm.prompts import build_step_prompt, build_stepwise_episode_prompt
 
 
 class LLMStepwiseRewardWrapper(gym.Wrapper):
@@ -50,7 +51,6 @@ class LLMStepwiseRewardWrapper(gym.Wrapper):
     def __init__(self, env: gym.Env) -> None:
         super().__init__(env)
         self.collected: dict[str, int] = {}
-        self.required_collected: dict[str, int] = {}   # task-useful coins only
         self.episode_step_events: list[str] = []
         self.ep_rwd: list[float] = []
 
@@ -61,11 +61,10 @@ class LLMStepwiseRewardWrapper(gym.Wrapper):
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         self.collected = {}
-        self.required_collected = {}
         self.episode_step_events = []
         self.instruction = self.env.instruction
-        self.required = self.env.required_coins          # {color: count}
-        self.coin_positions = self.env.coin_positions    # {color: [(r,c), …]}
+        self.required = self.env.required_coins       # {color: count}
+        self.coin_positions = self.env.coin_positions  # {color: [(r,c), …]}
         return obs, info
 
     # ------------------------------------------------------------------
@@ -74,94 +73,73 @@ class LLMStepwiseRewardWrapper(gym.Wrapper):
 
     def step(self, action: int):
         prev_pos = tuple(self.env.agent_pos)
-
-        # ── Snapshot state before the environment step ────────────────────
-        remaining_before = self._remaining_required()
-        remaining_pos_before = self._remaining_coin_positions()
-        required_locs = [
-            pos
-            for color, n in remaining_before.items()
-            if n > 0
-            for pos in self.coin_positions.get(color, [])
-        ]
-        prev_dist = (
-            min(self._manhattan(prev_pos, p) for p in required_locs)
-            if required_locs else None
-        )
-        prev_collected = dict(self.collected)
+        prev_counts = dict(self.collected)
 
         # ── Environment step ─────────────────────────────────────────────
         obs, _, done, truncated, info = self.env.step(action)
         new_pos = tuple(self.env.agent_pos)
 
-        # ── Update raw collected counts ───────────────────────────────────
+        # ── Update collected counts ───────────────────────────────────────
         self.collected = {}
         for color, _ in self.env.collected:
             self.collected[color] = self.collected.get(color, 0) + 1
 
+        # Coins picked up on this exact step
         just_collected = [
             color
             for color, new_ct in self.collected.items()
-            for _ in range(new_ct - prev_collected.get(color, 0))
+            for _ in range(new_ct - prev_counts.get(color, 0))
         ]
 
-        # ── Classify coins BEFORE updating required_collected (bug-fix) ───
-        collected_info = []
-        for color in just_collected:
-            req_so_far = self.required_collected.get(color, 0)
-            if color in self.required and req_so_far < self.required[color]:
-                collected_info.append({"color": color, "type": "required"})
-                self.required_collected[color] = req_so_far + 1
-            else:
-                collected_info.append({"color": color, "type": "extra"})
-
-        # ── Distance after step (same target locations as before) ─────────
-        new_dist = (
-            min(self._manhattan(new_pos, p) for p in required_locs)
-            if required_locs else None
-        )
-
-        # ── Distance trend (computed in Python, not by LLM) ──────────────
-        if prev_dist is None:
-            distance_trend = "no_required"
-        elif new_dist < prev_dist:
-            distance_trend = "closer"
-        elif new_dist > prev_dist:
-            distance_trend = "farther"
+        # ── Distance to nearest required coin (from initial positions) ────
+        required_locations = [
+            pos
+            for col, needed in self.required.items()
+            if needed > 0 and col in self.coin_positions
+            for pos in self.coin_positions[col]
+        ]
+        if required_locations:
+            prev_dist = min(self._manhattan(prev_pos, p) for p in required_locations)
+            new_dist = min(self._manhattan(new_pos, p) for p in required_locations)
         else:
-            distance_trend = "same"
+            prev_dist = new_dist = 0
 
         # ── Query LLM for step reward ─────────────────────────────────────
         step_prompt = build_step_prompt(
             instruction=self.instruction,
+            prev_counts=prev_counts,
+            new_counts=self.collected,
+            just_collected=just_collected,
             prev_pos=prev_pos,
             new_pos=new_pos,
-            collected_info=collected_info,
-            remaining_required=remaining_before,
-            remaining_positions=remaining_pos_before,
-            distance_trend=distance_trend,
+            required=self.required,
+            coin_positions=self.coin_positions,
+            prev_dist=prev_dist,
+            new_dist=new_dist,
         )
         response = query_ollama(step_prompt)
-        scores = re.findall(r"Score:\s*(-?\d+(?:\.\d+)?)", response)
+        scores = re.findall(r"FScore:\s*(-?\d+(?:\.\d+)?)", response)
         step_reward = max(-1.0, min(1.0, float(scores[-1]))) if scores else 0.0
 
         print(
             f"[LLM-Step] {prev_pos}→{new_pos} | "
-            f"collected={collected_info} | trend={distance_trend} | "
-            f"reward={step_reward:.3f}"
+            f"collected={just_collected} | "
+            f"dist {prev_dist}→{new_dist} | reward={step_reward:.3f}"
         )
         self.episode_step_events.append(
-            f"{prev_pos}->{new_pos}, collected={collected_info}, "
-            f"trend={distance_trend}, reward={step_reward:.3f}"
+            f"Step: {prev_pos}->{new_pos}, "
+            f"collected={just_collected}, reward={step_reward:.3f}"
         )
         info["llm_step_reward"] = step_reward
 
         # ── Episode end: final episodic LLM score ────────────────────────
         if done:
             summary = self.env.get_episode_summary()
-            final_prompt = build_episodic_prompt(self.instruction, summary)
+            final_prompt = build_stepwise_episode_prompt(
+                self.instruction, summary, self.episode_step_events
+            )
             final_resp = query_ollama(final_prompt)
-            final_scores = re.findall(r"Score:\s*(-?\d+(?:\.\d+)?)", final_resp)
+            final_scores = re.findall(r"FScore:\s*(-?\d+(?:\.\d+)?)", final_resp)
             final_reward = (
                 max(-1.0, min(1.0, float(final_scores[-1])))
                 if final_scores else 0.0
@@ -180,23 +158,6 @@ class LLMStepwiseRewardWrapper(gym.Wrapper):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _remaining_required(self) -> dict[str, int]:
-        """Coins still needed to complete the task."""
-        return {
-            color: needed - self.required_collected.get(color, 0)
-            for color, needed in self.required.items()
-            if needed - self.required_collected.get(color, 0) > 0
-        }
-
-    def _remaining_coin_positions(self) -> dict[str, list[tuple[int, int]]]:
-        """Positions of coins still present on the grid."""
-        collected_positions = {pos for _, pos in self.env.collected}
-        return {
-            color: [p for p in positions if p not in collected_positions]
-            for color, positions in self.coin_positions.items()
-            if any(p not in collected_positions for p in positions)
-        }
 
     @staticmethod
     def _manhattan(a: tuple[int, int], b: tuple[int, int]) -> int:

@@ -1,54 +1,41 @@
 """
 Prompt builders for LLM-based reward evaluation.
 
-Two prompt styles are provided:
-
 build_episodic_prompt
     Used by HybridRewardWrapper and LLMEpisodicRewardWrapper.
-    Evaluates the full episode from the final summary only.
+    Evaluates the full episode from the summary only.
     LLM returns a score tagged ``Score: <float>``.
 
 build_step_prompt
-    Used by LLMStepwiseRewardWrapper.
-    Evaluates a single agent action from pre-computed facts (position
-    change, collected-coin classification, distance trend).
-    LLM returns a score tagged ``Score: <float>``.
+    Used by LLMStepwiseRewardWrapper at each step.
+    Gives the LLM raw counts, agent movement, and distance-to-coin
+    context.  The LLM decides a reward following open-ended guidelines.
+    LLM returns a score tagged ``FScore: <float>``.
 
-All numeric facts (distances, coin counts, classifications) are computed
-in Python and provided to the LLM as structured context so the model only
-needs to apply a fixed decision rule — not compute arithmetic itself.
+build_stepwise_episode_prompt
+    Used by LLMStepwiseRewardWrapper at episode end.
+    Evaluates the whole episode using the final summary plus the
+    accumulated step-event log.
+    LLM returns a score tagged ``FScore: <float>``.
 """
 
 from __future__ import annotations
 
 
 # ---------------------------------------------------------------------------
-# Episodic prompt  (Hybrid + LLMEpisodic)
+# Episodic prompt  (HybridRewardWrapper + LLMEpisodicRewardWrapper)
 # ---------------------------------------------------------------------------
 
 def build_episodic_prompt(instruction: str, summary: str) -> str:
     """
-    Build an evaluation prompt for end-of-episode scoring.
-
-    The LLM is given the task instruction and the collected-coin summary,
-    applies the fixed scoring formula, and returns ``Score: <float>``.
+    Build an end-of-episode evaluation prompt.
 
     Scoring formula
     ~~~~~~~~~~~~~~~
-    score = 1.0 − 0.5 × total_missed − 0.25 × total_extra
-    clipped to [−1.0, 1.0]
+    score = 1.0 − 0.5 × total_missed − 0.25 × total_extra,
+    clipped to [−1.0, 1.0].
 
-    Parameters
-    ----------
-    instruction : str
-        Natural-language task instruction given to the agent.
-    summary : str
-        Output of ``CoinGridEnv.get_episode_summary()``.
-
-    Returns
-    -------
-    str
-        Fully-formatted prompt string ready to send to the LLM.
+    Response tag: ``Score: <float>``
     """
     return (
         "You are an automated evaluator for a coin-collection RL task.\n\n"
@@ -85,80 +72,152 @@ def build_episodic_prompt(instruction: str, summary: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Stepwise prompt  (LLMStepwiseRewardWrapper)
+# Step prompt  (LLMStepwiseRewardWrapper — per-step call)
 # ---------------------------------------------------------------------------
 
 def build_step_prompt(
     instruction: str,
+    prev_counts: dict[str, int],
+    new_counts: dict[str, int],
+    just_collected: list[str],
     prev_pos: tuple[int, int],
     new_pos: tuple[int, int],
-    collected_info: list[dict],
-    remaining_required: dict[str, int],
-    remaining_positions: dict[str, list],
-    distance_trend: str,
+    required: dict[str, int],
+    coin_positions: dict[str, list],
+    prev_dist: float | None,
+    new_dist: float | None,
 ) -> str:
     """
-    Build an evaluation prompt for a single agent step.
+    Build a per-step evaluation prompt.
 
-    All numeric facts are pre-computed by Python; the LLM applies a
-    deterministic decision rule and returns ``Score: <float>``.
-
-    Decision rule
-    ~~~~~~~~~~~~~
-    1. If any collected coin is classified ``"extra"``    →  Score = −0.35
-    2. Else if any collected coin is classified ``"required"`` →  Score = +0.35
-    3. Else (no coin collected):
-        distance_trend == "closer"      →  Score = +0.10
-        distance_trend == "farther"     →  Score = −0.10
-        distance_trend == "same"        →  Score = −0.025
-        distance_trend == "no_required" →  Score =  0.0
+    All numeric facts are pre-computed by Python and handed to the LLM as
+    context.  The LLM follows open-ended guidelines to decide a reward in
+    [-1.0, 1.0].
 
     Parameters
     ----------
     instruction : str
         Natural-language task instruction.
+    prev_counts : dict
+        Coin counts collected before this step.
+    new_counts : dict
+        Coin counts collected after this step.
+    just_collected : list[str]
+        Colours of coins picked up on this exact step.
     prev_pos, new_pos : tuple[int, int]
         Agent grid position before and after the action.
-    collected_info : list[dict]
-        Each entry is ``{"color": str, "type": "required" | "extra"}``.
-    remaining_required : dict[str, int]
-        Coins still needed to complete the task.
-    remaining_positions : dict[str, list]
-        Grid positions of coins still on the board.
-    distance_trend : str
-        One of ``"closer"``, ``"farther"``, ``"same"``, ``"no_required"``.
+    required : dict[str, int]
+        Full set of coins required by the instruction.
+    coin_positions : dict[str, list]
+        Initial grid positions of all coins (snapshot at episode start).
+    prev_dist, new_dist : float | None
+        Manhattan distance to the nearest required coin before/after the
+        step.  ``None`` when no required coins remain on the board.
 
-    Returns
-    -------
-    str
-        Fully-formatted prompt string ready to send to the LLM.
+    Response tag: ``FScore: <float>``
     """
-    return (
-        "You are evaluating ONE action in a grid-world coin collection task.\n\n"
+    return f"""
+You are evaluating an RL agent step-by-step in a coin collection grid world.
 
-        f"TASK INSTRUCTION:\n{instruction}\n\n"
+Instruction:
+{instruction}
 
-        f"REMAINING REQUIRED COINS:\n{remaining_required}\n\n"
+Previous collected counts:
+{prev_counts}
 
-        f"REMAINING COIN POSITIONS:\n{remaining_positions}\n\n"
+New collected counts after this step:
+{new_counts}
 
-        f"AGENT MOVE:\n"
-        f"Previous position: {prev_pos}\n"
-        f"New position:      {new_pos}\n\n"
+Coins collected *on this exact step*:
+{just_collected}
 
-        f"COLLECTED THIS STEP:\n{collected_info}\n\n"
+=== TASK ===
+{instruction}
 
-        f"DISTANCE TREND (system-computed):\n{distance_trend}\n\n"
+=== REQUIRED COINS ===
+{required}
 
-        "STRICT DECISION RULE:\n"
-        '1. If ANY collected coin has type == "extra"     → Score = -0.35\n'
-        '2. ELSE IF ANY coin has type == "required"       → Score = +0.35\n'
-        "3. ELSE (no coin collected):\n"
-        '   distance_trend == "closer"      → Score = +0.10\n'
-        '   distance_trend == "farther"     → Score = -0.10\n'
-        '   distance_trend == "same"        → Score = -0.025\n'
-        '   distance_trend == "no_required" → Score =  0.0\n\n'
+=== COIN POSITIONS ===
+{coin_positions}
 
-        "OUTPUT FORMAT (STRICT):\n"
-        "Score: <float>\n"
-    )
+=== AGENT MOVE ===
+Previous position: {prev_pos}
+New position: {new_pos}
+
+Distance to nearest REQUIRED coin before move: {prev_dist}
+Distance after move: {new_dist}
+
+=== GUIDELINES FOR REWARD ===
+1. If a required coin is collected, give a positive reward.
+2. If a wrong/extra coin is collected, give a negative reward.
+3. If no coin collected:
+   - If agent moved closer to nearest required coin (new_dist < prev_dist) → small positive reward
+   - If agent moved farther from nearest required coin (new_dist > prev_dist) → small negative reward
+   - If distance did not change → neutral reward
+4. Output only the numeric reward as a float.
+
+=== FORMAT ===
+FScore: <float>
+"""
+
+
+# ---------------------------------------------------------------------------
+# Stepwise episode prompt  (LLMStepwiseRewardWrapper — episode-end call)
+# ---------------------------------------------------------------------------
+
+def build_stepwise_episode_prompt(
+    instruction: str,
+    summary: str,
+    step_events: list[str],
+) -> str:
+    """
+    Build an end-of-episode evaluation prompt for the stepwise wrapper.
+
+    Includes the full per-step event log so the LLM can audit the
+    trajectory before assigning a final score.
+
+    Scoring formula
+    ~~~~~~~~~~~~~~~
+    score = 1.0 − 0.5 × total_missed − 0.25 × total_extra,
+    clipped to [−1.0, 1.0].
+
+    Response tag: ``FScore: <float>``
+    """
+    return f"""
+Evaluate the final episode.
+
+Instruction:
+{instruction}
+
+Final summary:
+{summary}
+
+Step events:
+{step_events}
+
+You are an automated evaluator for a coin-collection RL task.
+
+TASK:
+Evaluate the agent's performance and compute a numeric score.
+
+SCORING RULES:
+- Start with a base score of 1.0.
+- For every missed required coin, subtract 0.5.
+- For every extra or wrong-colour coin, subtract 0.25.
+- For each colour in the instruction:
+    If collected < required  →  missed = required − collected
+    If collected > required  →  extra  = collected − required
+- For each colour not in the instruction but collected  →  extra = collected
+- Final score = 1.0 − 0.5 × total_missed − 0.25 × total_extra
+- Clip the final score to [−1.0, 1.0].
+
+PROCESS:
+1. Extract all colours and counts from the instruction and summary.
+2. Compute missed and extra coins once per colour.
+3. Summarise total_missed and total_extra.
+4. Compute final score strictly using the formula.
+5. Do not include unnecessary commentary.
+
+FORMAT STRICTLY:
+FScore: <float between -1.0 and 1.0>
+"""
