@@ -69,8 +69,6 @@ A **10-stage curriculum** progressively transfers from dense, rule-based reward 
 │   └── training/
 │       ├── curriculum.py         # Stage config + training loop
 │       └── plotting.py           # Reward visualisation
-├── notebooks/
-│   └── coingrid_llm_rl.ipynb     # Original research notebook
 ├── scripts/
 │   └── train.py                  # CLI entry point
 └── requirements.txt
@@ -182,10 +180,6 @@ python scripts/train.py \
     --save-model models/final_ppo \
     --save-plot results/reward_curve.png
 ```
-
-**Notebook:**
-
-Open `notebooks/coingrid_llm_rl.ipynb` in Jupyter for the original research notebook with all experimental stages.
 
 ---
 
